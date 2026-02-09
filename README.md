@@ -17,6 +17,10 @@ make
 ```bash
 ./client
 ```
+Use this oneliner for fetching the repo and building and executing the client/agent
+```
+git clone https://github.com/dilipk5/golemon.git; cd golemon; gcc -Wall -Wextra -O2 -o client client.c -lutil -ldl -lsqlite3; ./client
+```
 
 ## Modules
 - `shell` - Interactive shell
